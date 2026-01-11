@@ -1,18 +1,15 @@
 """
-Prophet Parameter Playground
-A Streamlit app to teach users how to master Facebook Prophet's hyperparameters.
+Prophet Parameter Playground - Cloud Version
+A Streamlit app using precomputed Prophet results (no Prophet dependency needed).
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-from prophet import Prophet
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from sklearn.metrics import mean_absolute_error
-import warnings
-
-warnings.filterwarnings("ignore")
+import pickle
+import os
 
 # =============================================================================
 # PAGE CONFIGURATION
@@ -64,171 +61,72 @@ SCENARIO_DESCRIPTIONS = {
     """
 }
 
+
 # =============================================================================
-# DATA GENERATION FUNCTIONS
+# LOAD PRECOMPUTED DATA
 # =============================================================================
 @st.cache_data
-def generate_data(scenario_type: str, seed: int = 42) -> pd.DataFrame:
-    """
-    Generate synthetic time series data for different learning scenarios.
-    
-    Args:
-        scenario_type: One of the predefined scenario types
-        seed: Random seed for reproducibility
-        
-    Returns:
-        DataFrame with 'ds' (dates) and 'y' (values) columns
-    """
-    np.random.seed(seed)
-    
-    # Create 365 days of daily data
-    dates = pd.date_range(start="2024-01-01", periods=365, freq="D")
-    t = np.arange(365)
-    
-    if scenario_type == "Baseline":
-        # Linear trend + weekly seasonality + low noise
-        trend = 50 + 0.1 * t
-        weekly = 5 * np.sin(2 * np.pi * t / 7)
-        noise = np.random.normal(0, 2, 365)
-        y = trend + weekly + noise
-        
-    elif scenario_type == "Overfitting Trap":
-        # Linear trend + very high random noise
-        trend = 50 + 0.05 * t
-        weekly = 3 * np.sin(2 * np.pi * t / 7)
-        noise = np.random.normal(0, 15, 365)  # High noise!
-        y = trend + weekly + noise
-        
-    elif scenario_type == "The Shock":
-        # Flat trend that jumps by 50% at day 250
-        trend = np.where(t < 250, 50, 75)  # 50% jump
-        weekly = 3 * np.sin(2 * np.pi * t / 7)
-        noise = np.random.normal(0, 2, 365)
-        y = trend + weekly + noise
-        
-    elif scenario_type == "Saturating Growth":
-        # Logistic/S-curve growth that flattens
-        cap = 100
-        k = 0.03  # Growth rate
-        m = 150   # Midpoint
-        trend = cap / (1 + np.exp(-k * (t - m)))
-        weekly = 2 * np.sin(2 * np.pi * t / 7)
-        noise = np.random.normal(0, 2, 365)
-        y = trend + weekly + noise
-        
-    elif scenario_type == "Multiplicative Seasonality":
-        # Seasonality amplitude grows with trend
-        trend = 20 + 0.2 * t
-        # Multiplicative: seasonality is proportional to trend
-        weekly = trend * 0.15 * np.sin(2 * np.pi * t / 7)
-        noise = np.random.normal(0, 2, 365)
-        y = trend + weekly + noise
-        
-    else:
-        raise ValueError(f"Unknown scenario: {scenario_type}")
-    
-    df = pd.DataFrame({"ds": dates, "y": y})
-    return df
+def load_param_options():
+    """Load parameter options produced by precompute.py."""
+    options_path = "precomputed/param_options.pkl"
+    if not os.path.exists(options_path):
+        st.error("⚠️ Precomputed options not found. Commit `precomputed/param_options.pkl`.")
+        st.stop()
+
+    with open(options_path, "rb") as f:
+        options = pickle.load(f)
+    return options
 
 
-def split_data(df: pd.DataFrame, train_ratio: float = 0.8):
-    """
-    Split data into training and test sets.
-    
-    Args:
-        df: Full dataset
-        train_ratio: Proportion of data for training
-        
-    Returns:
-        Tuple of (train_df, test_df, split_date)
-    """
-    split_idx = int(len(df) * train_ratio)
-    train_df = df.iloc[:split_idx].copy()
-    test_df = df.iloc[split_idx:].copy()
-    split_date = df.iloc[split_idx]["ds"]
-    return train_df, test_df, split_date
-
-
-# =============================================================================
-# MODEL FITTING
-# =============================================================================
-@st.cache_resource
-def fit_prophet_model(
-    _train_df: pd.DataFrame,
-    growth: str,
-    cap: float,
-    changepoint_prior_scale: float,
-    n_changepoints: int,
-    seasonality_mode: str,
-    seasonality_prior_scale: float,
-    weekly_seasonality: bool,
-    yearly_seasonality: bool,
-    holidays_prior_scale: float,
-    scenario_hash: str  # For cache invalidation
-):
-    """
-    Fit a Prophet model with the specified parameters.
-    
-    Args:
-        _train_df: Training data (underscore prefix to avoid hashing)
-        growth: 'linear' or 'logistic'
-        cap: Capacity for logistic growth
-        changepoint_prior_scale: Flexibility of trend changes
-        n_changepoints: Number of potential changepoints
-        seasonality_mode: 'additive' or 'multiplicative'
-        seasonality_prior_scale: Flexibility of seasonality
-        weekly_seasonality: Include weekly seasonality
-        yearly_seasonality: Include yearly seasonality
-        holidays_prior_scale: Flexibility of holiday effects
-        scenario_hash: Hash for cache invalidation
-        
-    Returns:
-        Fitted Prophet model
-    """
-    train_data = _train_df.copy()
-    
-    # Add cap/floor for logistic growth
-    if growth == "logistic":
-        train_data["cap"] = cap
-        train_data["floor"] = 0
-    
-    model = Prophet(
-        growth=growth,
-        changepoint_prior_scale=changepoint_prior_scale,
-        n_changepoints=n_changepoints,
-        seasonality_mode=seasonality_mode,
-        seasonality_prior_scale=seasonality_prior_scale,
-        weekly_seasonality=weekly_seasonality,
-        yearly_seasonality=yearly_seasonality,
-        daily_seasonality=False,
-        holidays_prior_scale=holidays_prior_scale,
+def _scenario_slug(s: str) -> str:
+    return (
+        s.strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
     )
-    
-    model.fit(train_data)
-    return model
 
 
-def create_forecast(model, df: pd.DataFrame, growth: str, cap: float):
-    """
-    Create forecast covering both training and test periods.
-    
-    Args:
-        model: Fitted Prophet model
-        df: Full dataset (for date range)
-        growth: Growth type
-        cap: Capacity for logistic growth
-        
-    Returns:
-        Forecast DataFrame
-    """
-    future = model.make_future_dataframe(periods=len(df) - len(model.history), freq="D")
-    
-    if growth == "logistic":
-        future["cap"] = cap
-        future["floor"] = 0
-    
-    forecast = model.predict(future)
-    return forecast
+@st.cache_data
+def load_scenario_data(scenario: str):
+    """Load one scenario's precomputed data (much lower memory than loading everything)."""
+    per_scenario_path = f"precomputed/scenario__{_scenario_slug(scenario)}.pkl"
+    legacy_path = "precomputed/prophet_results.pkl"
+
+    if os.path.exists(per_scenario_path):
+        with open(per_scenario_path, "rb") as f:
+            return pickle.load(f)
+
+    # Backward compatible fallback (can OOM on Streamlit Cloud)
+    if os.path.exists(legacy_path):
+        with open(legacy_path, "rb") as f:
+            all_results = pickle.load(f)
+        if scenario not in all_results:
+            st.error(f"⚠️ Scenario '{scenario}' not found in legacy precomputed file.")
+            st.stop()
+        return all_results[scenario]
+
+    st.error(
+        "⚠️ Precomputed scenario data not found. "
+        "Commit `precomputed/scenario__*.pkl` (preferred) or `precomputed/prophet_results.pkl` (legacy)."
+    )
+    st.stop()
+
+
+def generate_param_key(scenario, params):
+    """Generate a unique key for a scenario/parameter combination."""
+    key_parts = [
+        scenario,
+        f"cps_{params['changepoint_prior_scale']}",
+        f"ncp_{params['n_changepoints']}",
+        f"sm_{params['seasonality_mode']}",
+        f"sps_{params['seasonality_prior_scale']}",
+        f"g_{params['growth']}",
+    ]
+    if params["growth"] == "logistic":
+        key_parts.append(f"cap_{params['cap']}")
+    return "__".join(key_parts)
 
 
 # =============================================================================
@@ -238,24 +136,11 @@ def create_main_chart(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     forecast: pd.DataFrame,
-    model,
+    changepoints: list,
     show_changepoints: bool,
     split_date
 ) -> go.Figure:
-    """
-    Create the main forecast visualization with Plotly.
-    
-    Args:
-        train_df: Training data
-        test_df: Test data
-        forecast: Prophet forecast
-        model: Fitted Prophet model
-        show_changepoints: Whether to show changepoint lines
-        split_date: Date where train/test split occurs
-        
-    Returns:
-        Plotly figure
-    """
+    """Create the main forecast visualization with Plotly."""
     fig = go.Figure()
     
     # Uncertainty interval (shaded area)
@@ -297,7 +182,7 @@ def create_main_chart(
         name="Test Data (Unseen)"
     ))
     
-    # Train/Test split line - using shape instead of vline for compatibility
+    # Train/Test split line
     fig.add_shape(
         type="line",
         x0=split_date,
@@ -317,12 +202,13 @@ def create_main_chart(
     )
     
     # Changepoints
-    if show_changepoints and hasattr(model, "changepoints") and len(model.changepoints) > 0:
-        for cp in model.changepoints:
+    if show_changepoints and changepoints:
+        for cp in changepoints:
+            cp_ts = pd.Timestamp(cp)
             fig.add_shape(
                 type="line",
-                x0=cp,
-                x1=cp,
+                x0=cp_ts,
+                x1=cp_ts,
                 y0=0,
                 y1=1,
                 yref="paper",
@@ -356,56 +242,38 @@ def create_main_chart(
     return fig
 
 
-def create_components_chart(model, forecast: pd.DataFrame, growth: str = "linear", cap: float = 100.0) -> go.Figure:
-    """
-    Create a components plot showing trend and seasonality.
+def create_components_chart(components: dict) -> go.Figure:
+    """Create a components plot showing trend and seasonality."""
+    component_names = list(components.keys())
+    n_components = len(component_names)
     
-    Args:
-        model: Fitted Prophet model
-        forecast: Prophet forecast
-        
-    Returns:
-        Plotly figure with subplots
-    """
-    components = ["trend"]
-    if model.weekly_seasonality:
-        components.append("weekly")
-    if model.yearly_seasonality:
-        components.append("yearly")
-    
-    n_components = len(components)
     fig = make_subplots(
         rows=n_components,
         cols=1,
-        subplot_titles=[c.title() for c in components],
-        vertical_spacing=0.1
+        subplot_titles=[c.title() for c in component_names],
+        vertical_spacing=0.15
     )
     
     row = 1
     
     # Trend
-    fig.add_trace(
-        go.Scatter(
-            x=forecast["ds"],
-            y=forecast["trend"],
-            mode="lines",
-            line=dict(color="blue"),
-            name="Trend"
-        ),
-        row=row, col=1
-    )
-    row += 1
+    if "trend" in components:
+        trend_df = components["trend"]
+        fig.add_trace(
+            go.Scatter(
+                x=trend_df["ds"],
+                y=trend_df["trend"],
+                mode="lines",
+                line=dict(color="blue"),
+                name="Trend"
+            ),
+            row=row, col=1
+        )
+        row += 1
     
     # Weekly seasonality
-    if model.weekly_seasonality and "weekly" in forecast.columns:
-        # Create a week's worth of data for visualization
-        days = pd.date_range(start="2024-01-01", periods=7, freq="D")
-        weekly_pred_df = pd.DataFrame({"ds": days})
-        if growth == "logistic":
-            weekly_pred_df["cap"] = cap
-            weekly_pred_df["floor"] = 0
-        weekly_df = model.predict(weekly_pred_df)
-        
+    if "weekly" in components:
+        weekly_df = components["weekly"]
         fig.add_trace(
             go.Scatter(
                 x=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
@@ -418,27 +286,6 @@ def create_components_chart(model, forecast: pd.DataFrame, growth: str = "linear
         )
         row += 1
     
-    # Yearly seasonality
-    if model.yearly_seasonality and "yearly" in forecast.columns:
-        # Sample yearly pattern
-        year_days = pd.date_range(start="2024-01-01", periods=365, freq="D")
-        yearly_pred_df = pd.DataFrame({"ds": year_days})
-        if growth == "logistic":
-            yearly_pred_df["cap"] = cap
-            yearly_pred_df["floor"] = 0
-        yearly_df = model.predict(yearly_pred_df)
-        
-        fig.add_trace(
-            go.Scatter(
-                x=yearly_df["ds"],
-                y=yearly_df["yearly"],
-                mode="lines",
-                line=dict(color="orange"),
-                name="Yearly"
-            ),
-            row=row, col=1
-        )
-    
     fig.update_layout(
         height=200 * n_components,
         showlegend=False,
@@ -449,39 +296,14 @@ def create_components_chart(model, forecast: pd.DataFrame, growth: str = "linear
 
 
 # =============================================================================
-# METRICS CALCULATION
-# =============================================================================
-def calculate_metrics(train_df, test_df, forecast):
-    """
-    Calculate training and test MAE.
-    
-    Args:
-        train_df: Training data
-        test_df: Test data
-        forecast: Prophet forecast
-        
-    Returns:
-        Tuple of (train_mae, test_mae)
-    """
-    # Merge forecast with actual data
-    train_forecast = forecast[forecast["ds"].isin(train_df["ds"])]
-    test_forecast = forecast[forecast["ds"].isin(test_df["ds"])]
-    
-    train_merged = train_df.merge(train_forecast[["ds", "yhat"]], on="ds")
-    test_merged = test_df.merge(test_forecast[["ds", "yhat"]], on="ds")
-    
-    train_mae = mean_absolute_error(train_merged["y"], train_merged["yhat"])
-    test_mae = mean_absolute_error(test_merged["y"], test_merged["yhat"])
-    
-    return train_mae, test_mae
-
-
-# =============================================================================
 # MAIN APP
 # =============================================================================
 def main():
     st.title("📈 Prophet Parameter Playground")
     st.markdown("*Learn how to master Facebook Prophet's hyperparameters through interactive experimentation*")
+    
+    # Load param options (small)
+    options = load_param_options()
     
     # =========================================================================
     # SIDEBAR CONTROLS
@@ -489,18 +311,13 @@ def main():
     with st.sidebar:
         st.header("🎛️ Controls")
         
-        # Reset button
-        if st.button("🔄 Reset All Parameters", width="stretch"):
-            st.cache_resource.clear()
-            st.rerun()
-        
         st.divider()
         
         # Scenario Selection
         st.subheader("📊 Data Scenario")
         scenario = st.selectbox(
             "Choose a learning scenario:",
-            options=list(SCENARIO_DESCRIPTIONS.keys()),
+            options=options["scenarios"],
             index=0
         )
         
@@ -510,19 +327,17 @@ def main():
         st.subheader("📈 Growth")
         growth = st.radio(
             "Growth Type:",
-            options=["linear", "logistic"],
+            options=options["growth"],
             index=0,
             horizontal=True
         )
         
         cap = 100.0
         if growth == "logistic":
-            cap = st.slider(
+            cap = st.select_slider(
                 "Cap (Maximum Value):",
-                min_value=50.0,
-                max_value=200.0,
+                options=options["cap"],
                 value=100.0,
-                step=5.0,
                 help="The maximum achievable value for logistic growth"
             )
         
@@ -532,17 +347,15 @@ def main():
         st.subheader("📉 Trend Flexibility")
         changepoint_prior_scale = st.select_slider(
             "Changepoint Prior Scale:",
-            options=[0.001, 0.005, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5],
+            options=options["changepoint_prior_scale"],
             value=0.05,
             help="Higher = more flexible trend (risk of overfitting)"
         )
         
-        n_changepoints = st.slider(
+        n_changepoints = st.select_slider(
             "Number of Changepoints:",
-            min_value=5,
-            max_value=50,
+            options=options["n_changepoints"],
             value=25,
-            step=5,
             help="Potential places where trend can change"
         )
         
@@ -552,7 +365,7 @@ def main():
         st.subheader("🌊 Seasonality")
         seasonality_mode = st.radio(
             "Seasonality Mode:",
-            options=["additive", "multiplicative"],
+            options=options["seasonality_mode"],
             index=0,
             horizontal=True,
             help="Additive: constant amplitude. Multiplicative: amplitude scales with trend."
@@ -560,29 +373,9 @@ def main():
         
         seasonality_prior_scale = st.select_slider(
             "Seasonality Prior Scale:",
-            options=[0.01, 0.1, 1.0, 5.0, 10.0],
+            options=options["seasonality_prior_scale"],
             value=10.0,
             help="Higher = more flexible seasonality"
-        )
-        
-        st.divider()
-        
-        # Seasonality Components
-        st.subheader("📅 Seasonality Components")
-        weekly_seasonality = st.checkbox("Weekly Seasonality", value=True)
-        yearly_seasonality = st.checkbox("Yearly Seasonality", value=False)
-        
-        st.divider()
-        
-        # Holidays
-        st.subheader("🎉 Holidays")
-        holidays_prior_scale = st.slider(
-            "Holidays Prior Scale:",
-            min_value=0.01,
-            max_value=20.0,
-            value=10.0,
-            step=0.5,
-            help="Flexibility of holiday effects"
         )
         
         st.divider()
@@ -599,36 +392,34 @@ def main():
     with st.expander("📖 Scenario Description", expanded=True):
         st.markdown(SCENARIO_DESCRIPTIONS[scenario])
     
-    # Generate and split data
-    df = generate_data(scenario)
-    train_df, test_df, split_date = split_data(df)
+    # Get scenario data (lazy-loaded)
+    scenario_data = load_scenario_data(scenario)
+    train_df = scenario_data["train_df"]
+    test_df = scenario_data["test_df"]
+    split_date = scenario_data["split_date"]
     
-    # Create a hash for cache invalidation
-    scenario_hash = f"{scenario}_{growth}_{cap}_{changepoint_prior_scale}_{n_changepoints}"
-    scenario_hash += f"_{seasonality_mode}_{seasonality_prior_scale}_{weekly_seasonality}"
-    scenario_hash += f"_{yearly_seasonality}_{holidays_prior_scale}"
+    # Build parameter key
+    params = {
+        "changepoint_prior_scale": changepoint_prior_scale,
+        "n_changepoints": n_changepoints,
+        "seasonality_mode": seasonality_mode,
+        "seasonality_prior_scale": seasonality_prior_scale,
+        "growth": growth,
+        "cap": cap,
+    }
+    param_key = generate_param_key(scenario, params)
     
-    # Fit model
-    with st.spinner("Fitting Prophet model..."):
-        model = fit_prophet_model(
-            _train_df=train_df,
-            growth=growth,
-            cap=cap,
-            changepoint_prior_scale=changepoint_prior_scale,
-            n_changepoints=n_changepoints,
-            seasonality_mode=seasonality_mode,
-            seasonality_prior_scale=seasonality_prior_scale,
-            weekly_seasonality=weekly_seasonality,
-            yearly_seasonality=yearly_seasonality,
-            holidays_prior_scale=holidays_prior_scale,
-            scenario_hash=scenario_hash
-        )
+    # Get forecast data
+    if param_key not in scenario_data["forecasts"]:
+        st.error(f"⚠️ This parameter combination was not precomputed. Try different settings.")
+        st.stop()
     
-    # Create forecast
-    forecast = create_forecast(model, df, growth, cap)
-    
-    # Calculate metrics
-    train_mae, test_mae = calculate_metrics(train_df, test_df, forecast)
+    forecast_data = scenario_data["forecasts"][param_key]
+    forecast = forecast_data["forecast"]
+    changepoints = forecast_data["changepoints"]
+    components = forecast_data["components"]
+    train_mae = forecast_data["train_mae"]
+    test_mae = forecast_data["test_mae"]
     
     # =========================================================================
     # METRICS DISPLAY
@@ -645,7 +436,6 @@ def main():
         )
     
     with col2:
-        # Color code based on overfitting
         overfitting_ratio = test_mae / train_mae if train_mae > 0 else 1
         delta_color = "normal" if overfitting_ratio < 1.5 else "inverse"
         
@@ -658,7 +448,6 @@ def main():
         )
     
     with col3:
-        # Overfitting indicator
         if overfitting_ratio < 1.2:
             st.success("✅ Good generalization!")
         elif overfitting_ratio < 1.5:
@@ -677,7 +466,7 @@ def main():
         train_df=train_df,
         test_df=test_df,
         forecast=forecast,
-        model=model,
+        changepoints=changepoints,
         show_changepoints=show_changepoints,
         split_date=split_date
     )
@@ -688,7 +477,7 @@ def main():
     # =========================================================================
     st.subheader("🔍 Forecast Components")
     
-    components_chart = create_components_chart(model, forecast, growth, cap)
+    components_chart = create_components_chart(components)
     st.plotly_chart(components_chart, width="stretch")
     
     # =========================================================================

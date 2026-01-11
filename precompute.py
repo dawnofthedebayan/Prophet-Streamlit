@@ -16,6 +16,16 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+
+def _scenario_slug(s: str) -> str:
+    return (
+        s.strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+    )
+
 # =============================================================================
 # DATA GENERATION (same as app.py)
 # =============================================================================
@@ -183,8 +193,6 @@ def main():
     """Precompute all forecasts and save to disk."""
     os.makedirs("precomputed", exist_ok=True)
     
-    all_results = {}
-    
     # Generate all parameter combinations
     param_keys = list(PARAM_GRID.keys())
     param_values = list(PARAM_GRID.values())
@@ -243,16 +251,13 @@ def main():
             except Exception as e:
                 print(f"  ⚠️ Error for {param_key}: {e}")
                 continue
-        
-        all_results[scenario] = scenario_data
-    
-    # Save to pickle
-    output_path = "precomputed/prophet_results.pkl"
-    with open(output_path, "wb") as f:
-        pickle.dump(all_results, f)
-    
-    print(f"\n✅ Saved precomputed results to {output_path}")
-    print(f"   File size: {os.path.getsize(output_path) / 1024 / 1024:.2f} MB")
+
+        scenario_output_path = f"precomputed/scenario__{_scenario_slug(scenario)}.pkl"
+        with open(scenario_output_path, "wb") as f:
+            pickle.dump(scenario_data, f)
+
+        print(f"✅ Saved {scenario} to {scenario_output_path}")
+        print(f"   File size: {os.path.getsize(scenario_output_path) / 1024 / 1024:.2f} MB")
     
     # Also save parameter options for the app
     param_options = {
